@@ -2,11 +2,14 @@
 const ctx = canvas.getContext("2d");
 
 const toolButtons = [...document.querySelectorAll(".tool-btn")];
+const detailControls = [...document.querySelectorAll(".detail-control")];
 const hueInput = document.getElementById("hue");
 const satInput = document.getElementById("sat");
 const lightInput = document.getElementById("light");
 const sizeInput = document.getElementById("size");
 const colorPreview = document.getElementById("colorPreview");
+const colorPlane = document.getElementById("colorPlane");
+const lightBar = document.getElementById("lightBar");
 const templateSelect = document.getElementById("templateSelect");
 const shapeSelect = document.getElementById("shapeSelect");
 const imageInput = document.getElementById("imageInput");
@@ -29,6 +32,7 @@ const saveDataBtn = document.getElementById("saveDataBtn");
 const resetNoteBtn = document.getElementById("resetNoteBtn");
 const loadDataInput = document.getElementById("loadDataInput");
 const deleteSelectedBtn = document.getElementById("deleteSelectedBtn");
+const selectedObjectInfo = document.getElementById("selectedObjectInfo");
 
 const PAGE_RATIO_W = 257;
 const PAGE_RATIO_H = 364;
@@ -128,11 +132,138 @@ function getCurrentColorObj() {
 
 function updateColorPreview() {
   colorPreview.style.background = hsla(1);
+  drawColorPicker();
+}
+
+function drawColorPicker() {
+  if (!colorPlane || !lightBar) return;
+
+  const planeCtx = colorPlane.getContext("2d");
+  const barCtx = lightBar.getContext("2d");
+  const planeW = colorPlane.width;
+  const planeH = colorPlane.height;
+  const image = planeCtx.createImageData(planeW, planeH);
+
+  for (let y = 0; y < planeH; y++) {
+    for (let x = 0; x < planeW; x++) {
+      const h = (x / (planeW - 1)) * 360;
+      const s = 100 - (y / (planeH - 1)) * 100;
+      const { r, g, b } = hslToRgb(h, s, Number(lightInput.value));
+      const index = (y * planeW + x) * 4;
+      image.data[index] = r;
+      image.data[index + 1] = g;
+      image.data[index + 2] = b;
+      image.data[index + 3] = 255;
+    }
+  }
+  planeCtx.putImageData(image, 0, 0);
+
+  const barGradient = barCtx.createLinearGradient(0, 0, 0, lightBar.height);
+  barGradient.addColorStop(0, `hsl(${hueInput.value}, ${satInput.value}%, 100%)`);
+  barGradient.addColorStop(0.5, `hsl(${hueInput.value}, ${satInput.value}%, 50%)`);
+  barGradient.addColorStop(1, `hsl(${hueInput.value}, ${satInput.value}%, 0%)`);
+  barCtx.fillStyle = barGradient;
+  barCtx.fillRect(0, 0, lightBar.width, lightBar.height);
+
+  drawPickerMarks(planeCtx, barCtx);
+}
+
+function drawPickerMarks(planeCtx, barCtx) {
+  const x = (Number(hueInput.value) / 360) * colorPlane.width;
+  const y = (1 - Number(satInput.value) / 100) * colorPlane.height;
+  planeCtx.save();
+  planeCtx.strokeStyle = "#fff";
+  planeCtx.lineWidth = 2;
+  planeCtx.beginPath();
+  planeCtx.arc(x, y, 5, 0, Math.PI * 2);
+  planeCtx.stroke();
+  planeCtx.strokeStyle = "#111";
+  planeCtx.lineWidth = 1;
+  planeCtx.beginPath();
+  planeCtx.arc(x, y, 6, 0, Math.PI * 2);
+  planeCtx.stroke();
+  planeCtx.restore();
+
+  const ly = (1 - Number(lightInput.value) / 100) * lightBar.height;
+  barCtx.save();
+  barCtx.strokeStyle = "#fff";
+  barCtx.lineWidth = 2;
+  barCtx.beginPath();
+  barCtx.moveTo(0, ly);
+  barCtx.lineTo(lightBar.width, ly);
+  barCtx.stroke();
+  barCtx.restore();
+}
+
+function hslToRgb(h, s, l) {
+  s /= 100;
+  l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = h / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r1 = 0;
+  let g1 = 0;
+  let b1 = 0;
+
+  if (hp >= 0 && hp < 1) [r1, g1, b1] = [c, x, 0];
+  else if (hp < 2) [r1, g1, b1] = [x, c, 0];
+  else if (hp < 3) [r1, g1, b1] = [0, c, x];
+  else if (hp < 4) [r1, g1, b1] = [0, x, c];
+  else if (hp < 5) [r1, g1, b1] = [x, 0, c];
+  else [r1, g1, b1] = [c, 0, x];
+
+  const m = l - c / 2;
+  return {
+    r: Math.round((r1 + m) * 255),
+    g: Math.round((g1 + m) * 255),
+    b: Math.round((b1 + m) * 255),
+  };
+}
+
+function pickColorFromPlane(e) {
+  const rect = colorPlane.getBoundingClientRect();
+  const x = Math.min(Math.max(e.clientX - rect.left, 0), rect.width);
+  const y = Math.min(Math.max(e.clientY - rect.top, 0), rect.height);
+  hueInput.value = Math.round((x / rect.width) * 360);
+  satInput.value = Math.round(100 - (y / rect.height) * 100);
+  updateColorPreview();
+  draw();
+}
+
+function pickLightFromBar(e) {
+  const rect = lightBar.getBoundingClientRect();
+  const y = Math.min(Math.max(e.clientY - rect.top, 0), rect.height);
+  lightInput.value = Math.round(100 - (y / rect.height) * 100);
+  updateColorPreview();
+  draw();
+}
+
+function updateToolDetails(tool) {
+  detailControls.forEach((control) => {
+    const tools = (control.dataset.tools || "").split(/\s+/);
+    control.hidden = !tools.includes(tool);
+  });
+  updateSelectedObjectInfo();
+}
+
+function updateSelectedObjectInfo() {
+  if (!selectedObjectInfo) return;
+  const selected = selectedId ? currentPage().elements.find((el) => el.id === selectedId) : null;
+  selectedObjectInfo.textContent = selected ? `${getElementLabel(selected)}を選択中` : "未選択";
+}
+
+function getElementLabel(el) {
+  if (el.type === "text") return "テキスト";
+  if (el.type === "template") return "定型文";
+  if (el.type === "image") return "画像";
+  if (el.type === "shape") return "図形";
+  return "オブジェクト";
 }
 
 function setTool(tool) {
   currentTool = tool;
   toolButtons.forEach((b) => b.classList.toggle("active", b.dataset.tool === tool));
+  updateToolDetails(tool);
   if (tool !== "mouse") {
     selectedId = null;
   }
@@ -390,6 +521,7 @@ function updateUi() {
     const bg = currentPage().background || "plain";
     backgroundType.value = backgroundType.querySelector(`option[value="${bg}"]`) ? bg : "plain";
   }
+  updateSelectedObjectInfo();
   updateColorPreview();
 }
 
@@ -967,6 +1099,26 @@ toolButtons.forEach((btn) => btn.addEventListener("click", () => setTool(btn.dat
 [hueInput, satInput, lightInput].forEach((input) => input.addEventListener("input", draw));
 sizeInput.addEventListener("input", draw);
 
+if (colorPlane) {
+  colorPlane.addEventListener("pointerdown", (e) => {
+    colorPlane.setPointerCapture(e.pointerId);
+    pickColorFromPlane(e);
+  });
+  colorPlane.addEventListener("pointermove", (e) => {
+    if (e.buttons) pickColorFromPlane(e);
+  });
+}
+
+if (lightBar) {
+  lightBar.addEventListener("pointerdown", (e) => {
+    lightBar.setPointerCapture(e.pointerId);
+    pickLightFromBar(e);
+  });
+  lightBar.addEventListener("pointermove", (e) => {
+    if (e.buttons) pickLightFromBar(e);
+  });
+}
+
 imageInput.addEventListener("change", (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
@@ -1039,6 +1191,7 @@ canvas.addEventListener("pointerup", endPointer);
 canvas.addEventListener("pointerleave", endPointer);
 
 updateColorPreview();
+updateToolDetails(currentTool);
 noteDate.value = getTodayLocalDateString();
 state.noteDate = noteDate.value;
 setTopMenuCollapsed(true);
