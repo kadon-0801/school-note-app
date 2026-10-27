@@ -12,12 +12,14 @@
       <div>
         <p class="home-eyebrow">学習ノート</p>
         <h1>ノート一覧</h1>
-        <p class="home-description">このブラウザに保存されているノートです。</p>
       </div>
-      <button id="createNoteBtn" class="primary-action" type="button">＋ 新しいノート</button>
     </header>
     <p id="homeStatus" class="home-status" aria-live="polite"></p>
-    <div id="noteList" class="note-list" aria-live="polite"></div>
+    <div class="home-carousel">
+      <button id="prevHomePageBtn" class="home-page-btn" type="button" aria-label="前のノート一覧">◀</button>
+      <div id="noteList" class="note-list" aria-live="polite"></div>
+      <button id="nextHomePageBtn" class="home-page-btn" type="button" aria-label="次のノート一覧">▶</button>
+    </div>
   </section>
 
   <div id="editorScreen" class="app-shell" hidden>

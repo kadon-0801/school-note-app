@@ -24,10 +24,11 @@ const mainArea = document.getElementById("mainArea");
 const topMenuToggle = document.getElementById("topMenuToggle");
 const homeScreen = document.getElementById("homeScreen");
 const editorScreen = document.getElementById("editorScreen");
-const createNoteBtn = document.getElementById("createNoteBtn");
 const goHomeBtn = document.getElementById("goHomeBtn");
 const noteList = document.getElementById("noteList");
 const homeStatus = document.getElementById("homeStatus");
+const prevHomePageBtn = document.getElementById("prevHomePageBtn");
+const nextHomePageBtn = document.getElementById("nextHomePageBtn");
 
 const pageIndicator = document.getElementById("pageIndicator");
 const prevPageBtn = document.getElementById("prevPageBtn");
@@ -77,6 +78,8 @@ let selectedTextEditInProgress = false;
 let currentNoteId = null;
 let currentNoteCreatedAt = null;
 let localSaveTimer = null;
+let homePage = 0;
+const HOME_PAGE_SIZE = 5;
 
 const LOCAL_NOTE_DB_NAME = "learning-note-library";
 const LOCAL_NOTE_STORE = "notes";
@@ -195,17 +198,20 @@ async function renderHome() {
   noteList.replaceChildren();
   try {
     const notes = await getStoredNotes();
-    homeStatus.textContent = `${notes.length}件のノートをこのブラウザに保存しています。`;
-    if (!notes.length) {
-      const empty = document.createElement("div");
-      empty.className = "empty-notes";
-      empty.textContent = "まだノートがありません。新しいノートを作成してください。";
-      noteList.append(empty);
-      return;
-    }
-    notes.forEach((note) => {
+    const pageCount = Math.max(1, Math.ceil(notes.length / HOME_PAGE_SIZE));
+    homePage = Math.min(homePage, pageCount - 1);
+    const visibleNotes = notes.slice(homePage * HOME_PAGE_SIZE, (homePage + 1) * HOME_PAGE_SIZE);
+    homeStatus.textContent = notes.length
+      ? `${notes.length}件中 ${homePage * HOME_PAGE_SIZE + 1}〜${homePage * HOME_PAGE_SIZE + visibleNotes.length}件を表示`
+      : "新しいノートを作成してください。";
+    prevHomePageBtn.disabled = homePage === 0;
+    nextHomePageBtn.disabled = homePage >= pageCount - 1;
+
+    visibleNotes.forEach((note) => {
       const card = document.createElement("article");
       card.className = "note-card";
+      const thumbnail = document.createElement("div");
+      thumbnail.className = "note-thumbnail";
       const title = document.createElement("h2");
       title.textContent = note.noteTitle || "ノート";
       const subject = document.createElement("p");
@@ -216,7 +222,7 @@ async function renderHome() {
       date.textContent = `日付: ${note.noteDate || "未設定"}`;
       const saved = document.createElement("p");
       saved.className = "note-meta";
-      saved.textContent = `更新: ${formatSavedAt(note.updatedAt)}`;
+      saved.textContent = `更新 ${formatSavedAt(note.updatedAt)}`;
       const actions = document.createElement("div");
       actions.className = "note-card-actions";
       const open = document.createElement("button");
@@ -229,9 +235,16 @@ async function renderHome() {
       remove.textContent = "削除";
       remove.addEventListener("click", () => deleteStoredNote(note));
       actions.append(open, remove);
-      card.append(title, subject, date, saved, actions);
+      card.append(thumbnail, title, subject, date, saved, actions);
       noteList.append(card);
     });
+
+    const createCard = document.createElement("button");
+    createCard.type = "button";
+    createCard.className = "new-note-card";
+    createCard.textContent = "＋\n新しいノート";
+    createCard.addEventListener("click", createNewNote);
+    noteList.append(createCard);
   } catch (error) {
     homeStatus.textContent = "ノート保存領域を利用できません。ブラウザのサイトデータ設定を確認してください。";
   }
@@ -262,6 +275,7 @@ async function openStoredNote(note) {
   homeScreen.hidden = true;
   editorScreen.hidden = false;
   draw();
+  setScreenUrl("editor", note.id, true);
 }
 
 async function createNewNote() {
@@ -278,6 +292,7 @@ async function createNewNote() {
   homeScreen.hidden = true;
   editorScreen.hidden = false;
   draw();
+  setScreenUrl("editor", currentNoteId, true);
 }
 
 async function deleteStoredNote(note) {
@@ -296,6 +311,35 @@ async function returnHome() {
   }
   editorScreen.hidden = true;
   homeScreen.hidden = false;
+  setScreenUrl("home", null, true);
+  renderHome();
+}
+
+function setScreenUrl(screen, noteId, push) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("screen", screen);
+  if (noteId) url.searchParams.set("note", noteId);
+  else url.searchParams.delete("note");
+  history[push ? "pushState" : "replaceState"]({ screen, noteId }, "", url);
+}
+
+async function showScreenFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const screen = params.get("screen") || "home";
+  const noteId = params.get("note");
+  if (screen === "editor" && noteId) {
+    const note = await withNoteStore("readonly", (store) => store.get(noteId));
+    if (note) {
+      applyNoteRecord(note);
+      homeScreen.hidden = true;
+      editorScreen.hidden = false;
+      draw();
+      return;
+    }
+  }
+  editorScreen.hidden = true;
+  homeScreen.hidden = false;
+  setScreenUrl("home", null, false);
   renderHome();
 }
 
@@ -1702,8 +1746,20 @@ noteDate.addEventListener("change", () => {
   scheduleLocalSave();
 });
 
-createNoteBtn.addEventListener("click", createNewNote);
 goHomeBtn.addEventListener("click", returnHome);
+prevHomePageBtn.addEventListener("click", () => {
+  if (homePage <= 0) return;
+  homePage -= 1;
+  renderHome();
+});
+nextHomePageBtn.addEventListener("click", () => {
+  homePage += 1;
+  renderHome();
+});
+
+window.addEventListener("popstate", () => {
+  showScreenFromUrl();
+});
 
 window.addEventListener("pagehide", () => {
   persistCurrentNote().catch(() => {});
@@ -1738,4 +1794,4 @@ state.noteDate = noteDate.value;
 setTopMenuCollapsed(true);
 editorScreen.hidden = true;
 homeScreen.hidden = false;
-renderHome();
+showScreenFromUrl();
