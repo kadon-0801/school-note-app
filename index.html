@@ -58,7 +58,13 @@
             </label>
             <span id="colorPreview" class="color-preview detail-control" data-tools="pen aiText marker line text template shape"></span>
 
-            <p id="aiTextStatus" class="ai-text-help detail-control" data-tools="aiText">書き終えると、少し待って文字へ変換します。</p>
+            <p id="aiTextStatus" class="ai-text-help detail-control" data-tools="aiText">書き終えると候補を表示します。</p>
+            <section id="aiCandidatePanel" class="ai-candidate-panel detail-control" data-tools="aiText" aria-live="polite">
+              <p class="ai-candidate-title">変換候補</p>
+              <div id="aiCandidates" class="ai-candidates">
+                <p class="ai-candidate-placeholder">手書きすると候補が表示されます。</p>
+              </div>
+            </section>
 
             <label class="detail-control" data-tools="text">文字
               <textarea id="textInput" class="text-input" rows="4" placeholder="ここに文字を入力"></textarea>
@@ -188,7 +194,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

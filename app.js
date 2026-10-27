@@ -48,6 +48,7 @@ const selectedObjectInfo = document.getElementById("selectedObjectInfo");
 const selectedTextEditor = document.getElementById("selectedTextEditor");
 const selectedTextInput = document.getElementById("selectedTextInput");
 const aiTextStatus = document.getElementById("aiTextStatus");
+const aiCandidates = document.getElementById("aiCandidates");
 
 const PAGE_RATIO_W = 257;
 const PAGE_RATIO_H = 364;
@@ -73,7 +74,7 @@ let selectedId = null;
 let interaction = null;
 let handwritingSession = null;
 let handwritingTimer = null;
-let handwritingWorkerPromise = null;
+let handwritingCandidateSession = null;
 let selectedTextEditInProgress = false;
 let currentNoteId = null;
 let currentNoteCreatedAt = null;
@@ -853,6 +854,9 @@ function draw() {
   if (handwritingSession?.page === page) {
     handwritingSession.strokes.forEach((s) => drawStroke(ctx, s));
   }
+  if (handwritingCandidateSession?.page === page) {
+    handwritingCandidateSession.strokes.forEach((s) => drawStroke(ctx, s));
+  }
   if (activeStroke) drawStroke(ctx, activeStroke);
   drawCenterBinder(ctx);
 
@@ -961,44 +965,91 @@ function setAiTextStatus(message) {
   if (aiTextStatus) aiTextStatus.textContent = message;
 }
 
-async function getHandwritingWorker() {
-  if (!window.Tesseract) {
-    throw new Error("文字認識の読み込みに失敗しました。インターネット接続を確認して再読み込みしてください。");
+function clearHandwritingCandidates() {
+  handwritingCandidateSession = null;
+  if (aiCandidates) {
+    aiCandidates.replaceChildren();
+    const placeholder = document.createElement("p");
+    placeholder.className = "ai-candidate-placeholder";
+    placeholder.textContent = "手書きすると候補が表示されます。";
+    aiCandidates.append(placeholder);
   }
-  if (!handwritingWorkerPromise) {
-    setAiTextStatus("文字認識の準備中です…");
-    handwritingWorkerPromise = window.Tesseract.createWorker("jpn");
-  }
-  return handwritingWorkerPromise;
 }
 
-function handwritingImageData(strokes) {
+function getHandwritingBounds(strokes) {
   const points = strokes.flatMap((stroke) => stroke.points || []);
-  const padding = 24;
-  const minX = Math.min(...points.map((p) => p.x)) - padding;
-  const minY = Math.min(...points.map((p) => p.y)) - padding;
-  const maxX = Math.max(...points.map((p) => p.x)) + padding;
-  const maxY = Math.max(...points.map((p) => p.y)) + padding;
-  const image = document.createElement("canvas");
-  image.width = Math.max(1, Math.ceil(maxX - minX));
-  image.height = Math.max(1, Math.ceil(maxY - minY));
-  const imageCtx = image.getContext("2d");
-  imageCtx.fillStyle = "#fff";
-  imageCtx.fillRect(0, 0, image.width, image.height);
-  strokes.forEach((stroke) => {
-    imageCtx.save();
-    imageCtx.translate(-minX, -minY);
-    imageCtx.lineCap = "round";
-    imageCtx.lineJoin = "round";
-    imageCtx.strokeStyle = "#000";
-    imageCtx.lineWidth = Math.max(stroke.width || 4, 5);
-    imageCtx.beginPath();
-    imageCtx.moveTo(stroke.points[0].x, stroke.points[0].y);
-    stroke.points.slice(1).forEach((point) => imageCtx.lineTo(point.x, point.y));
-    imageCtx.stroke();
-    imageCtx.restore();
+  return {
+    minX: Math.min(...points.map((point) => point.x)),
+    minY: Math.min(...points.map((point) => point.y)),
+    maxX: Math.max(...points.map((point) => point.x)),
+    maxY: Math.max(...points.map((point) => point.y)),
+  };
+}
+
+function estimateHandwritingFontSize(bounds) {
+  return Math.round(Math.min(180, Math.max(18, (bounds.maxY - bounds.minY) * 0.95)));
+}
+
+async function requestHandwritingCandidates(session) {
+  const ink = session.strokes.map((stroke) => {
+    const startTime = stroke.points[0]?.t || 0;
+    return [
+      stroke.points.map((point) => point.x),
+      stroke.points.map((point) => point.y),
+      stroke.points.map((point) => (point.t || 0) - startTime),
+    ];
   });
-  return { imageData: image.toDataURL("image/png"), x: minX + padding, y: minY + padding };
+  const payload = {
+    device: navigator.userAgent,
+    input_type: 0,
+    options: "enable_pre_space",
+    requests: [{
+      writing_guide: { writing_area_width: W, writing_area_height: H },
+      ink,
+      language: "ja-t-i0-handwrit",
+    }],
+  };
+  const response = await fetch("https://inputtools.google.com/request?ime=handwriting&app=demopage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error("文字認識サービスに接続できませんでした。");
+  const result = await response.json();
+  const candidates = result?.[0] === "SUCCESS" ? result?.[1]?.[0]?.[1] : null;
+  if (!Array.isArray(candidates) || !candidates.length) {
+    throw new Error("文字を認識できませんでした。もう一度書いてください。");
+  }
+  return [...new Set(candidates.map((candidate) => String(candidate).trim()).filter(Boolean))].slice(0, 8);
+}
+
+function displayHandwritingCandidates(candidates, session) {
+  handwritingCandidateSession = session;
+  aiCandidates.replaceChildren();
+  candidates.forEach((candidate) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ai-candidate-btn";
+    button.textContent = candidate;
+    button.addEventListener("click", () => commitHandwritingCandidate(candidate));
+    aiCandidates.append(button);
+  });
+  setAiTextStatus("候補をクリックして文字に変換します。");
+  draw();
+}
+
+function commitHandwritingCandidate(text) {
+  const session = handwritingCandidateSession;
+  if (!session || !state.pages.includes(session.page)) return;
+  const bounds = getHandwritingBounds(session.strokes);
+  const settings = { ...toolSettings.aiText, size: estimateHandwritingFontSize(bounds) };
+  const element = createTextElement(text, bounds.minX - 6, bounds.minY - 6, settings);
+  session.page.elements.push(element);
+  handwritingCandidateSession = null;
+  if (session.page === currentPage() && currentTool === "mouse") selectedId = element.id;
+  clearHandwritingCandidates();
+  setAiTextStatus("書き終えると候補を表示します。");
+  draw();
 }
 
 async function recognizeHandwritingSession() {
@@ -1006,24 +1057,18 @@ async function recognizeHandwritingSession() {
   const session = handwritingSession;
   if (!session || !session.strokes.length) return;
   handwritingSession = null;
-  const { imageData, x, y } = handwritingImageData(session.strokes);
   draw();
 
   try {
-    setAiTextStatus("文字を認識しています…");
-    const worker = await getHandwritingWorker();
-    const { data } = await worker.recognize(imageData);
-    const text = String(data.text || "").trim();
-    if (!text) throw new Error("文字を認識できませんでした。もう一度書いてください。");
+    setAiTextStatus("文字候補を認識しています…");
+    const candidates = await requestHandwritingCandidates(session);
     if (!state.pages.includes(session.page)) return;
-    const el = createTextElement(text, x, y, toolSettings.aiText);
-    session.page.elements.push(el);
-    if (session.page === currentPage() && currentTool === "mouse") selectedId = el.id;
+    displayHandwritingCandidates(candidates, session);
   } catch (error) {
     if (state.pages.includes(session.page)) session.page.strokes.push(...session.strokes);
     alert(error.message || "文字を認識できませんでした。手書きはそのまま残しました。");
   }
-  setAiTextStatus("書き終えると、少し待って文字へ変換します。");
+  if (!handwritingCandidateSession) setAiTextStatus("書き終えると候補を表示します。");
   draw();
 }
 
@@ -1152,6 +1197,12 @@ function startPointer(e) {
 
   if (currentTool === "pen" || currentTool === "marker" || currentTool === "aiText") {
     if (currentTool === "aiText" && handwritingTimer) clearTimeout(handwritingTimer);
+    if (currentTool === "aiText" && handwritingCandidateSession) {
+      if (state.pages.includes(handwritingCandidateSession.page)) {
+        handwritingCandidateSession.page.strokes.push(...handwritingCandidateSession.strokes);
+      }
+      clearHandwritingCandidates();
+    }
     if (currentTool === "aiText" && !handwritingSession) {
       recordHistory();
       handwritingSession = { page: currentPage(), strokes: [] };
@@ -1164,7 +1215,7 @@ function startPointer(e) {
       color: hsla(1),
       width: marker ? Math.max(Number(settings.size), 12) : Number(settings.size),
       alpha: marker ? 0.35 : 1,
-      points: [p],
+      points: [{ ...p, t: performance.now() }],
     };
     draw();
     return;
@@ -1358,9 +1409,9 @@ function movePointer(e) {
 
   if (drawing && activeStroke) {
     if (activeStroke.isLine) {
-      activeStroke.points[1] = p;
+      activeStroke.points[1] = { ...p, t: performance.now() };
     } else {
-      activeStroke.points.push(p);
+      activeStroke.points.push({ ...p, t: performance.now() });
     }
     draw();
     return;

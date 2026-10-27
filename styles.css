@@ -430,6 +430,8 @@ button:active {
 .tool-detail-panel {
   flex: 1 1 auto;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .tool-panel-title {
@@ -465,6 +467,7 @@ button:active {
   gap: 9px;
   align-items: stretch;
   flex-direction: column;
+  flex: 1 1 auto;
 }
 
 .detail-control[hidden] {
@@ -521,6 +524,45 @@ button:active {
   color: #dbe7f5;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.ai-candidate-panel {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, .14);
+}
+
+.ai-candidate-title {
+  margin: 0 0 8px;
+  color: #dbe7f5;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ai-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 34px;
+}
+
+.ai-candidate-btn {
+  flex: 0 0 auto;
+  border-color: #94c4ff;
+  background: #e7f1ff;
+  color: #143356;
+  font-weight: 700;
+}
+
+.ai-candidate-btn:first-child {
+  background: #5aa7ff;
+}
+
+.ai-candidate-placeholder {
+  margin: 0;
+  color: #c6d0dc;
+  font-size: 12px;
+  font-style: italic;
 }
 
 .color-picker {
