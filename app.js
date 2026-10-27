@@ -10,9 +10,11 @@ const sizeInput = document.getElementById("size");
 const colorPreview = document.getElementById("colorPreview");
 const colorPlane = document.getElementById("colorPlane");
 const lightBar = document.getElementById("lightBar");
+const textInput = document.getElementById("textInput");
 const templateSelect = document.getElementById("templateSelect");
 const shapeSelect = document.getElementById("shapeSelect");
 const imageInput = document.getElementById("imageInput");
+const imagePreview = document.getElementById("imagePreview");
 const backgroundType = document.getElementById("backgroundType");
 const subjectSelect = document.getElementById("subjectSelect");
 const subjectOther = document.getElementById("subjectOther");
@@ -20,6 +22,12 @@ const noteDate = document.getElementById("noteDate");
 const noteTitle = document.getElementById("noteTitle");
 const mainArea = document.getElementById("mainArea");
 const topMenuToggle = document.getElementById("topMenuToggle");
+const homeScreen = document.getElementById("homeScreen");
+const editorScreen = document.getElementById("editorScreen");
+const createNoteBtn = document.getElementById("createNoteBtn");
+const goHomeBtn = document.getElementById("goHomeBtn");
+const noteList = document.getElementById("noteList");
+const homeStatus = document.getElementById("homeStatus");
 
 const pageIndicator = document.getElementById("pageIndicator");
 const prevPageBtn = document.getElementById("prevPageBtn");
@@ -32,7 +40,13 @@ const saveDataBtn = document.getElementById("saveDataBtn");
 const resetNoteBtn = document.getElementById("resetNoteBtn");
 const loadDataInput = document.getElementById("loadDataInput");
 const deleteSelectedBtn = document.getElementById("deleteSelectedBtn");
+const clearPageBtn = document.getElementById("clearPageBtn");
+const undoBtn = document.getElementById("undoBtn");
+const redoBtn = document.getElementById("redoBtn");
 const selectedObjectInfo = document.getElementById("selectedObjectInfo");
+const selectedTextEditor = document.getElementById("selectedTextEditor");
+const selectedTextInput = document.getElementById("selectedTextInput");
+const aiTextStatus = document.getElementById("aiTextStatus");
 
 const PAGE_RATIO_W = 257;
 const PAGE_RATIO_H = 364;
@@ -56,6 +70,34 @@ let drawing = false;
 let activeStroke = null;
 let selectedId = null;
 let interaction = null;
+let handwritingSession = null;
+let handwritingTimer = null;
+let handwritingWorkerPromise = null;
+let selectedTextEditInProgress = false;
+let currentNoteId = null;
+let currentNoteCreatedAt = null;
+let localSaveTimer = null;
+
+const LOCAL_NOTE_DB_NAME = "learning-note-library";
+const LOCAL_NOTE_STORE = "notes";
+let localNoteDbPromise = null;
+
+const defaultToolSettings = {
+  pen: { h: 220, s: 70, l: 40, size: 4 },
+  aiText: { h: 220, s: 70, l: 40, size: 4 },
+  marker: { h: 55, s: 95, l: 58, size: 18 },
+  line: { h: 220, s: 70, l: 40, size: 4 },
+  eraser: { size: 16 },
+  text: { h: 0, s: 0, l: 10, size: 34, text: "" },
+  template: { h: 0, s: 75, l: 45, size: 34, template: "めあて" },
+  shape: { h: 220, s: 70, l: 40, size: 4, shape: "circle" },
+  image: {},
+  mouse: {},
+};
+
+const toolSettings = JSON.parse(JSON.stringify(defaultToolSettings));
+const undoStack = [];
+const redoStack = [];
 
 const imageCache = new Map();
 const backgroundImagePaths = {
@@ -79,6 +121,183 @@ const state = {
   noteDate: "",
   pages: [createEmptyPage("plain")],
 };
+
+function openLocalNoteDb() {
+  if (localNoteDbPromise) return localNoteDbPromise;
+  localNoteDbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(LOCAL_NOTE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(LOCAL_NOTE_STORE)) {
+        const store = db.createObjectStore(LOCAL_NOTE_STORE, { keyPath: "id" });
+        store.createIndex("updatedAt", "updatedAt");
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  return localNoteDbPromise;
+}
+
+async function withNoteStore(mode, operation) {
+  const db = await openLocalNoteDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(LOCAL_NOTE_STORE, mode);
+    const request = operation(transaction.objectStore(LOCAL_NOTE_STORE));
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+function makeLocalNoteRecord() {
+  const now = new Date().toISOString();
+  return {
+    id: currentNoteId || crypto.randomUUID(),
+    createdAt: currentNoteCreatedAt || now,
+    updatedAt: now,
+    noteTitle: noteTitle.value.trim() || "ノート",
+    subject: subjectSelect.value,
+    subjectOther: subjectOther.value,
+    noteDate: noteDate.value,
+    pages: clonePages(),
+    toolSettings: JSON.parse(JSON.stringify(toolSettings)),
+  };
+}
+
+async function persistCurrentNote() {
+  if (!currentNoteId) return;
+  const record = makeLocalNoteRecord();
+  await withNoteStore("readwrite", (store) => store.put(record));
+  currentNoteId = record.id;
+  currentNoteCreatedAt = record.createdAt;
+}
+
+function scheduleLocalSave() {
+  if (!currentNoteId || editorScreen.hidden) return;
+  clearTimeout(localSaveTimer);
+  localSaveTimer = window.setTimeout(() => {
+    persistCurrentNote().catch(() => {});
+  }, 800);
+}
+
+async function getStoredNotes() {
+  const notes = await withNoteStore("readonly", (store) => store.getAll());
+  return notes.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+function formatSavedAt(value) {
+  return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+async function renderHome() {
+  homeStatus.textContent = "ノートを読み込んでいます…";
+  noteList.replaceChildren();
+  try {
+    const notes = await getStoredNotes();
+    homeStatus.textContent = `${notes.length}件のノートをこのブラウザに保存しています。`;
+    if (!notes.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-notes";
+      empty.textContent = "まだノートがありません。新しいノートを作成してください。";
+      noteList.append(empty);
+      return;
+    }
+    notes.forEach((note) => {
+      const card = document.createElement("article");
+      card.className = "note-card";
+      const title = document.createElement("h2");
+      title.textContent = note.noteTitle || "ノート";
+      const subject = document.createElement("p");
+      subject.className = "note-meta";
+      subject.textContent = `教科: ${note.subject === "その他" ? (note.subjectOther || "その他") : (note.subject || "未設定")}`;
+      const date = document.createElement("p");
+      date.className = "note-meta";
+      date.textContent = `日付: ${note.noteDate || "未設定"}`;
+      const saved = document.createElement("p");
+      saved.className = "note-meta";
+      saved.textContent = `更新: ${formatSavedAt(note.updatedAt)}`;
+      const actions = document.createElement("div");
+      actions.className = "note-card-actions";
+      const open = document.createElement("button");
+      open.type = "button";
+      open.textContent = "開く";
+      open.addEventListener("click", () => openStoredNote(note));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "delete-note-btn";
+      remove.textContent = "削除";
+      remove.addEventListener("click", () => deleteStoredNote(note));
+      actions.append(open, remove);
+      card.append(title, subject, date, saved, actions);
+      noteList.append(card);
+    });
+  } catch (error) {
+    homeStatus.textContent = "ノート保存領域を利用できません。ブラウザのサイトデータ設定を確認してください。";
+  }
+}
+
+function applyNoteRecord(note) {
+  currentNoteId = note.id;
+  currentNoteCreatedAt = note.createdAt || new Date().toISOString();
+  state.pages = Array.isArray(note.pages) && note.pages.length ? clonePages(note.pages) : [createEmptyPage("plain")];
+  pageIndex = 0;
+  noteTitle.value = note.noteTitle || "ノート";
+  subjectSelect.value = note.subject || "国語";
+  subjectOther.value = note.subjectOther || "";
+  noteDate.value = note.noteDate || getTodayLocalDateString();
+  Object.keys(defaultToolSettings).forEach((tool) => {
+    toolSettings[tool] = { ...defaultToolSettings[tool], ...(note.toolSettings?.[tool] || {}) };
+  });
+  subjectOther.style.display = subjectSelect.value === "その他" ? "inline-block" : "none";
+  undoStack.length = 0;
+  redoStack.length = 0;
+  selectedId = null;
+  setTool("mouse");
+  updateUndoRedoButtons();
+}
+
+async function openStoredNote(note) {
+  applyNoteRecord(note);
+  homeScreen.hidden = true;
+  editorScreen.hidden = false;
+  draw();
+}
+
+async function createNewNote() {
+  applyNoteRecord({
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    noteTitle: "ノート",
+    subject: "国語",
+    subjectOther: "",
+    noteDate: getTodayLocalDateString(),
+    pages: [createEmptyPage("plain")],
+    toolSettings: defaultToolSettings,
+  });
+  homeScreen.hidden = true;
+  editorScreen.hidden = false;
+  draw();
+}
+
+async function deleteStoredNote(note) {
+  if (!confirm(`「${note.noteTitle || "ノート"}」をこのブラウザから削除しますか？`)) return;
+  await withNoteStore("readwrite", (store) => store.delete(note.id));
+  renderHome();
+}
+
+async function returnHome() {
+  clearTimeout(localSaveTimer);
+  try {
+    await persistCurrentNote();
+  } catch {
+    alert("ノートを保存できませんでした。ブラウザのサイトデータ設定を確認してください。");
+    return;
+  }
+  editorScreen.hidden = true;
+  homeScreen.hidden = false;
+  renderHome();
+}
 
 function getTodayLocalDateString() {
   const now = new Date();
@@ -110,12 +329,56 @@ function createEmptyPage(background = "plain") {
   };
 }
 
+function clonePages(pages = state.pages) {
+  return JSON.parse(JSON.stringify(pages));
+}
+
+function recordHistory() {
+  undoStack.push(clonePages());
+  redoStack.length = 0;
+  updateUndoRedoButtons();
+}
+
+function restorePages(snapshot) {
+  state.pages = clonePages(snapshot);
+  pageIndex = Math.min(pageIndex, state.pages.length - 1);
+  selectedId = null;
+  activeStroke = null;
+  interaction = null;
+  drawing = false;
+  draw();
+}
+
+function undo() {
+  if (!undoStack.length) return;
+  redoStack.push(clonePages());
+  restorePages(undoStack.pop());
+  updateUndoRedoButtons();
+}
+
+function redo() {
+  if (!redoStack.length) return;
+  undoStack.push(clonePages());
+  restorePages(redoStack.pop());
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  if (undoBtn) undoBtn.disabled = undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = redoStack.length === 0;
+}
+
 function currentPage() {
   return state.pages[pageIndex];
 }
 
+function currentSettings() {
+  return toolSettings[currentTool] || toolSettings.pen;
+}
+
 function hsla(alpha = 1) {
-  return `hsla(${hueInput.value}, ${satInput.value}%, ${lightInput.value}%, ${alpha})`;
+  const settings = currentSettings();
+  return `hsla(${settings.h ?? 0}, ${settings.s ?? 0}%, ${settings.l ?? 40}%, ${alpha})`;
 }
 
 function hslaFrom(h, s, l, alpha = 1) {
@@ -123,16 +386,29 @@ function hslaFrom(h, s, l, alpha = 1) {
 }
 
 function getCurrentColorObj() {
+  const settings = currentSettings();
   return {
-    h: Number(hueInput.value),
-    s: Number(satInput.value),
-    l: Number(lightInput.value),
+    h: Number(settings.h ?? 0),
+    s: Number(settings.s ?? 0),
+    l: Number(settings.l ?? 40),
   };
 }
 
 function updateColorPreview() {
   colorPreview.style.background = hsla(1);
   drawColorPicker();
+}
+
+function syncDetailInputsFromTool() {
+  const settings = currentSettings();
+  if ("h" in settings) hueInput.value = settings.h;
+  if ("s" in settings) satInput.value = settings.s;
+  if ("l" in settings) lightInput.value = settings.l;
+  if ("size" in settings) sizeInput.value = settings.size;
+  if (textInput) textInput.value = toolSettings.text.text || "";
+  if (templateSelect) templateSelect.value = toolSettings.template.template || "めあて";
+  if (shapeSelect) shapeSelect.value = toolSettings.shape.shape || "circle";
+  updateColorPreview();
 }
 
 function drawColorPicker() {
@@ -224,8 +500,11 @@ function pickColorFromPlane(e) {
   const rect = colorPlane.getBoundingClientRect();
   const x = Math.min(Math.max(e.clientX - rect.left, 0), rect.width);
   const y = Math.min(Math.max(e.clientY - rect.top, 0), rect.height);
-  hueInput.value = Math.round((x / rect.width) * 360);
-  satInput.value = Math.round(100 - (y / rect.height) * 100);
+  const settings = currentSettings();
+  settings.h = Math.round((x / rect.width) * 360);
+  settings.s = Math.round(100 - (y / rect.height) * 100);
+  hueInput.value = settings.h;
+  satInput.value = settings.s;
   updateColorPreview();
   draw();
 }
@@ -233,7 +512,9 @@ function pickColorFromPlane(e) {
 function pickLightFromBar(e) {
   const rect = lightBar.getBoundingClientRect();
   const y = Math.min(Math.max(e.clientY - rect.top, 0), rect.height);
-  lightInput.value = Math.round(100 - (y / rect.height) * 100);
+  const settings = currentSettings();
+  settings.l = Math.round(100 - (y / rect.height) * 100);
+  lightInput.value = settings.l;
   updateColorPreview();
   draw();
 }
@@ -252,6 +533,21 @@ function updateSelectedObjectInfo() {
   selectedObjectInfo.textContent = selected ? `${getElementLabel(selected)}を選択中` : "未選択";
 }
 
+function getSelectedTextElement() {
+  if (currentTool !== "mouse" || !selectedId) return null;
+  const selected = currentPage().elements.find((el) => el.id === selectedId);
+  return selected?.type === "text" ? selected : null;
+}
+
+function updateSelectedTextEditor() {
+  if (!selectedTextEditor || !selectedTextInput) return;
+  const selected = getSelectedTextElement();
+  selectedTextEditor.hidden = !selected;
+  if (selected && document.activeElement !== selectedTextInput) {
+    selectedTextInput.value = selected.text || "";
+  }
+}
+
 function getElementLabel(el) {
   if (el.type === "text") return "テキスト";
   if (el.type === "template") return "定型文";
@@ -263,6 +559,7 @@ function getElementLabel(el) {
 function setTool(tool) {
   currentTool = tool;
   toolButtons.forEach((b) => b.classList.toggle("active", b.dataset.tool === tool));
+  syncDetailInputsFromTool();
   updateToolDetails(tool);
   if (tool !== "mouse") {
     selectedId = null;
@@ -431,19 +728,26 @@ function drawElement(targetCtx, el) {
 }
 
 function drawShapePath(targetCtx, kind, w, h) {
-  const rw = w / 2;
-  const rh = h / 2;
+  // Shapes are always regular.  Use the smaller dimension as a safeguard for
+  // older saved notes that may still contain non-square shape bounds.
+  const radius = Math.min(w, h) / 2;
   targetCtx.beginPath();
   if (kind === "circle") {
-    targetCtx.ellipse(0, 0, rw, rh, 0, 0, Math.PI * 2);
+    targetCtx.arc(0, 0, radius, 0, Math.PI * 2);
     return;
   }
+
+  if (kind === "square") {
+    targetCtx.rect(-radius, -radius, radius * 2, radius * 2);
+    return;
+  }
+
   const sides = kind === "triangle" ? 3 : kind === "pentagon" ? 5 : kind === "hexagon" ? 6 : 4;
   const start = -Math.PI / 2;
   for (let i = 0; i < sides; i++) {
     const a = start + (Math.PI * 2 * i) / sides;
-    const px = Math.cos(a) * rw;
-    const py = Math.sin(a) * rh;
+    const px = Math.cos(a) * radius;
+    const py = Math.sin(a) * radius;
     if (i === 0) targetCtx.moveTo(px, py);
     else targetCtx.lineTo(px, py);
   }
@@ -502,6 +806,9 @@ function draw() {
   drawBackground(ctx, page);
 
   page.strokes.forEach((s) => drawStroke(ctx, s));
+  if (handwritingSession?.page === page) {
+    handwritingSession.strokes.forEach((s) => drawStroke(ctx, s));
+  }
   if (activeStroke) drawStroke(ctx, activeStroke);
   drawCenterBinder(ctx);
 
@@ -513,6 +820,7 @@ function draw() {
   }
 
   updateUi();
+  scheduleLocalSave();
 }
 
 function updateUi() {
@@ -522,6 +830,7 @@ function updateUi() {
     backgroundType.value = backgroundType.querySelector(`option[value="${bg}"]`) ? bg : "plain";
   }
   updateSelectedObjectInfo();
+  updateSelectedTextEditor();
   updateColorPreview();
 }
 
@@ -553,6 +862,125 @@ function drawWrappedText(targetCtx, text, x, y, maxWidth, fontSize) {
       yPos += lineHeight;
     }
   }
+}
+
+function measureTextElement(text, fontSize) {
+  const padding = 6;
+  const lineHeight = Math.round(fontSize * 1.35);
+  ctx.save();
+  ctx.font = `${fontSize}px "BIZ UDPGothic", "Yu Gothic UI", sans-serif`;
+  const lines = String(text).split("\n");
+  const widestLine = Math.max(...lines.map((line) => ctx.measureText(line).width), 1);
+  ctx.restore();
+  return {
+    w: Math.ceil(widestLine + padding * 2),
+    h: Math.ceil(lines.length * lineHeight + padding * 2),
+  };
+}
+
+function createTextElement(text, x, y, settings = toolSettings.text) {
+  const fontSize = Number(settings.size);
+  const bounds = measureTextElement(text, fontSize);
+  return {
+    id: crypto.randomUUID(),
+    type: "text",
+    text,
+    x,
+    y,
+    w: bounds.w,
+    h: bounds.h,
+    fontSize,
+    baseW: bounds.w,
+    baseH: bounds.h,
+    baseFontSize: fontSize,
+    color: hslaFrom(settings.h ?? 0, settings.s ?? 0, settings.l ?? 40),
+  };
+}
+
+function updateTextElement(el, text) {
+  const fontSize = el.baseFontSize || el.fontSize || 34;
+  const bounds = measureTextElement(text || " ", fontSize);
+  el.text = text;
+  el.w = bounds.w;
+  el.h = bounds.h;
+  el.baseW = bounds.w;
+  el.baseH = bounds.h;
+  el.baseFontSize = fontSize;
+}
+
+function scheduleHandwritingRecognition() {
+  if (handwritingTimer) clearTimeout(handwritingTimer);
+  handwritingTimer = window.setTimeout(recognizeHandwritingSession, 900);
+}
+
+function setAiTextStatus(message) {
+  if (aiTextStatus) aiTextStatus.textContent = message;
+}
+
+async function getHandwritingWorker() {
+  if (!window.Tesseract) {
+    throw new Error("文字認識の読み込みに失敗しました。インターネット接続を確認して再読み込みしてください。");
+  }
+  if (!handwritingWorkerPromise) {
+    setAiTextStatus("文字認識の準備中です…");
+    handwritingWorkerPromise = window.Tesseract.createWorker("jpn");
+  }
+  return handwritingWorkerPromise;
+}
+
+function handwritingImageData(strokes) {
+  const points = strokes.flatMap((stroke) => stroke.points || []);
+  const padding = 24;
+  const minX = Math.min(...points.map((p) => p.x)) - padding;
+  const minY = Math.min(...points.map((p) => p.y)) - padding;
+  const maxX = Math.max(...points.map((p) => p.x)) + padding;
+  const maxY = Math.max(...points.map((p) => p.y)) + padding;
+  const image = document.createElement("canvas");
+  image.width = Math.max(1, Math.ceil(maxX - minX));
+  image.height = Math.max(1, Math.ceil(maxY - minY));
+  const imageCtx = image.getContext("2d");
+  imageCtx.fillStyle = "#fff";
+  imageCtx.fillRect(0, 0, image.width, image.height);
+  strokes.forEach((stroke) => {
+    imageCtx.save();
+    imageCtx.translate(-minX, -minY);
+    imageCtx.lineCap = "round";
+    imageCtx.lineJoin = "round";
+    imageCtx.strokeStyle = "#000";
+    imageCtx.lineWidth = Math.max(stroke.width || 4, 5);
+    imageCtx.beginPath();
+    imageCtx.moveTo(stroke.points[0].x, stroke.points[0].y);
+    stroke.points.slice(1).forEach((point) => imageCtx.lineTo(point.x, point.y));
+    imageCtx.stroke();
+    imageCtx.restore();
+  });
+  return { imageData: image.toDataURL("image/png"), x: minX + padding, y: minY + padding };
+}
+
+async function recognizeHandwritingSession() {
+  handwritingTimer = null;
+  const session = handwritingSession;
+  if (!session || !session.strokes.length) return;
+  handwritingSession = null;
+  const { imageData, x, y } = handwritingImageData(session.strokes);
+  draw();
+
+  try {
+    setAiTextStatus("文字を認識しています…");
+    const worker = await getHandwritingWorker();
+    const { data } = await worker.recognize(imageData);
+    const text = String(data.text || "").trim();
+    if (!text) throw new Error("文字を認識できませんでした。もう一度書いてください。");
+    if (!state.pages.includes(session.page)) return;
+    const el = createTextElement(text, x, y, toolSettings.aiText);
+    session.page.elements.push(el);
+    if (session.page === currentPage() && currentTool === "mouse") selectedId = el.id;
+  } catch (error) {
+    if (state.pages.includes(session.page)) session.page.strokes.push(...session.strokes);
+    alert(error.message || "文字を認識できませんでした。手書きはそのまま残しました。");
+  }
+  setAiTextStatus("書き終えると、少し待って文字へ変換します。");
+  draw();
 }
 
 function getHandles(el) {
@@ -644,7 +1072,7 @@ function expandStrokePoints(stroke) {
 }
 
 function eraseAtPoint(p) {
-  const radius = Math.max(8, Number(sizeInput.value) * 2);
+  const radius = Math.max(8, Number(toolSettings.eraser.size) * 2);
   const radiusSq = radius * radius;
   const nextStrokes = [];
 
@@ -678,12 +1106,19 @@ function eraseAtPoint(p) {
 function startPointer(e) {
   const p = toCanvasPoint(e);
 
-  if (currentTool === "pen" || currentTool === "marker") {
+  if (currentTool === "pen" || currentTool === "marker" || currentTool === "aiText") {
+    if (currentTool === "aiText" && handwritingTimer) clearTimeout(handwritingTimer);
+    if (currentTool === "aiText" && !handwritingSession) {
+      recordHistory();
+      handwritingSession = { page: currentPage(), strokes: [] };
+    }
+    if (currentTool !== "aiText") recordHistory();
     drawing = true;
     const marker = currentTool === "marker";
+    const settings = currentSettings();
     activeStroke = {
       color: hsla(1),
-      width: marker ? Math.max(Number(sizeInput.value), 12) : Number(sizeInput.value),
+      width: marker ? Math.max(Number(settings.size), 12) : Number(settings.size),
       alpha: marker ? 0.35 : 1,
       points: [p],
     };
@@ -692,10 +1127,12 @@ function startPointer(e) {
   }
 
   if (currentTool === "line") {
+    recordHistory();
     drawing = true;
+    const settings = currentSettings();
     activeStroke = {
       color: hsla(1),
-      width: Number(sizeInput.value),
+      width: Number(settings.size),
       alpha: 1,
       points: [p, p],
       isLine: true,
@@ -705,6 +1142,7 @@ function startPointer(e) {
   }
 
   if (currentTool === "eraser") {
+    recordHistory();
     drawing = true;
     activeStroke = null;
     eraseAtPoint(p);
@@ -713,31 +1151,23 @@ function startPointer(e) {
   }
 
   if (currentTool === "text") {
-    const text = prompt("入力する文字を入れてください");
-    if (text && text.trim()) {
-      const el = {
-        id: crypto.randomUUID(),
-        type: "text",
-        text: text.trim(),
-        x: p.x,
-        y: p.y,
-        w: 280,
-        h: 110,
-        fontSize: 34,
-        baseW: 280,
-        baseH: 110,
-        baseFontSize: 34,
-        color: hsla(1),
-      };
-      currentPage().elements.push(el);
-      selectedId = el.id;
+    const settings = toolSettings.text;
+    const text = (settings.text || "").trim();
+    if (!text) {
+      alert("文字を入力してからノート上をクリックしてください。");
+      return;
     }
+    recordHistory();
+    const el = createTextElement(text, p.x, p.y, settings);
+    currentPage().elements.push(el);
+    selectedId = el.id;
     draw();
     return;
   }
 
   if (currentTool === "template") {
-    const text = templateSelect.value;
+    recordHistory();
+    const text = toolSettings.template.template || templateSelect.value;
     const c = getCurrentColorObj();
     ctx.save();
     ctx.font = `38px "BIZ UDPGothic", "Yu Gothic UI", sans-serif`;
@@ -750,11 +1180,11 @@ function startPointer(e) {
       x: p.x,
       y: p.y,
       w: tw + 36,
-      h: 56,
-      fontSize: 34,
+      h: Math.max(42, Number(toolSettings.template.size) + 22),
+      fontSize: Number(toolSettings.template.size),
       baseW: tw + 36,
-      baseH: 56,
-      baseFontSize: 34,
+      baseH: Math.max(42, Number(toolSettings.template.size) + 22),
+      baseFontSize: Number(toolSettings.template.size),
       hue: c.h,
       sat: c.s,
       light: c.l,
@@ -766,16 +1196,17 @@ function startPointer(e) {
   }
 
   if (currentTool === "shape") {
+    recordHistory();
     const c = getCurrentColorObj();
-    const size = Math.max(2, Number(sizeInput.value));
+    const size = Math.max(2, Number(toolSettings.shape.size));
     const el = {
       id: crypto.randomUUID(),
       type: "shape",
-      shapeKind: shapeSelect.value,
+      shapeKind: toolSettings.shape.shape || shapeSelect.value,
       x: p.x,
       y: p.y,
-      w: 180,
-      h: 140,
+      w: 160,
+      h: 160,
       rotation: 0,
       color: hsla(1),
       strokeWidth: size,
@@ -794,6 +1225,7 @@ function startPointer(e) {
       alert("先に下の『画像選択』から画像を選んでください。");
       return;
     }
+    recordHistory();
     const img = getCachedImage(selectedImageSrc);
     const ratio = img && img.naturalWidth ? img.naturalHeight / img.naturalWidth : 0.75;
     const w = 260;
@@ -838,6 +1270,7 @@ function startPointer(e) {
         }
         const handle = handleHitTest(p, selected);
         if (handle) {
+          recordHistory();
           interaction = {
             mode: "resize",
             id: selected.id,
@@ -852,6 +1285,7 @@ function startPointer(e) {
 
     const target = findTopElementAt(p);
     if (target) {
+      recordHistory();
       selectedId = target.id;
       const idx = page.elements.findIndex((el) => el.id === target.id);
       const [pick] = page.elements.splice(idx, 1);
@@ -910,11 +1344,15 @@ function movePointer(e) {
 
 function endPointer() {
   if (drawing && activeStroke) {
-    currentPage().strokes.push(
-      activeStroke.isLine
-        ? { ...activeStroke, points: expandStrokePoints(activeStroke), isLine: false }
-        : activeStroke,
-    );
+    const stroke = activeStroke.isLine
+      ? { ...activeStroke, points: expandStrokePoints(activeStroke), isLine: false }
+      : activeStroke;
+    if (currentTool === "aiText") {
+      handwritingSession?.strokes.push(stroke);
+      scheduleHandwritingRecognition();
+    } else {
+      currentPage().strokes.push(stroke);
+    }
   }
   drawing = false;
   activeStroke = null;
@@ -941,6 +1379,14 @@ function resizeElement(el, interactionData, p) {
     newY = r.y + r.h - newH;
   }
 
+  if (el.type === "shape") {
+    const size = Math.max(newW, newH);
+    if (interactionData.handle.includes("l")) newX = r.x + r.w - size;
+    if (interactionData.handle.includes("t")) newY = r.y + r.h - size;
+    newW = size;
+    newH = size;
+  }
+
   el.x = newX;
   el.y = newY;
   el.w = newW;
@@ -958,8 +1404,20 @@ function getCachedImage(src) {
 
 function deleteSelected() {
   if (!selectedId) return;
+  recordHistory();
   const page = currentPage();
   page.elements = page.elements.filter((e) => e.id !== selectedId);
+  selectedId = null;
+  draw();
+}
+
+function clearCurrentPage() {
+  const ok = confirm("このページの内容をすべて消去します。よろしいですか？");
+  if (!ok) return;
+  recordHistory();
+  const page = currentPage();
+  page.strokes = [];
+  page.elements = [];
   selectedId = null;
   draw();
 }
@@ -970,6 +1428,7 @@ function exportJson() {
     subject: subjectSelect.value,
     subjectOther: subjectOther.value,
     noteDate: noteDate.value,
+    toolSettings,
     pages: state.pages,
     exportedAt: new Date().toISOString(),
   };
@@ -990,6 +1449,7 @@ function importJson(file) {
       if (!Array.isArray(parsed.pages) || parsed.pages.length === 0) {
         throw new Error("ページデータがありません");
       }
+      recordHistory();
       state.pages = parsed.pages.map((p) => ({
         background: ["plain", "fourLine", "vertical5mm", "grid5mm"].includes(p.background)
           ? p.background
@@ -1002,6 +1462,15 @@ function importJson(file) {
       subjectSelect.value = parsed.subject || "国語";
       subjectOther.value = parsed.subjectOther || "";
       noteDate.value = parsed.noteDate || getTodayLocalDateString();
+      if (parsed.toolSettings) {
+        Object.keys(defaultToolSettings).forEach((tool) => {
+          toolSettings[tool] = {
+            ...defaultToolSettings[tool],
+            ...(parsed.toolSettings[tool] || {}),
+          };
+        });
+        syncDetailInputsFromTool();
+      }
       subjectOther.style.display = subjectSelect.value === "その他" ? "inline-block" : "none";
       selectedId = null;
       draw();
@@ -1050,6 +1519,7 @@ function exportPdf() {
 }
 
 function addPage() {
+  recordHistory();
   const bg = currentPage().background || "plain";
   state.pages.splice(pageIndex + 1, 0, createEmptyPage(bg));
   pageIndex += 1;
@@ -1062,6 +1532,7 @@ function removePage() {
     alert("1ページは残す必要があります。");
     return;
   }
+  recordHistory();
   state.pages.splice(pageIndex, 1);
   pageIndex = Math.max(0, pageIndex - 1);
   selectedId = null;
@@ -1089,6 +1560,7 @@ function setTopMenuCollapsed(collapsed) {
 function resetNote() {
   const ok = confirm("ノートを白紙に戻します。よろしいですか？");
   if (!ok) return;
+  recordHistory();
   state.pages = state.pages.map(() => createEmptyPage("plain"));
   pageIndex = 0;
   selectedId = null;
@@ -1096,8 +1568,57 @@ function resetNote() {
 }
 
 toolButtons.forEach((btn) => btn.addEventListener("click", () => setTool(btn.dataset.tool)));
-[hueInput, satInput, lightInput].forEach((input) => input.addEventListener("input", draw));
-sizeInput.addEventListener("input", draw);
+[hueInput, satInput, lightInput].forEach((input) => {
+  input.addEventListener("input", () => {
+    const settings = currentSettings();
+    if ("h" in settings) settings.h = Number(hueInput.value);
+    if ("s" in settings) settings.s = Number(satInput.value);
+    if ("l" in settings) settings.l = Number(lightInput.value);
+    updateColorPreview();
+    draw();
+  });
+});
+
+sizeInput.addEventListener("input", () => {
+  const settings = currentSettings();
+  settings.size = Number(sizeInput.value);
+});
+
+if (textInput) {
+  textInput.addEventListener("input", () => {
+    toolSettings.text.text = textInput.value;
+  });
+}
+
+if (selectedTextInput) {
+  selectedTextInput.addEventListener("focus", () => {
+    if (getSelectedTextElement() && !selectedTextEditInProgress) {
+      recordHistory();
+      selectedTextEditInProgress = true;
+    }
+  });
+  selectedTextInput.addEventListener("input", () => {
+    const selected = getSelectedTextElement();
+    if (!selected) return;
+    updateTextElement(selected, selectedTextInput.value);
+    draw();
+  });
+  selectedTextInput.addEventListener("blur", () => {
+    selectedTextEditInProgress = false;
+  });
+}
+
+if (templateSelect) {
+  templateSelect.addEventListener("change", () => {
+    toolSettings.template.template = templateSelect.value;
+  });
+}
+
+if (shapeSelect) {
+  shapeSelect.addEventListener("change", () => {
+    toolSettings.shape.shape = shapeSelect.value;
+  });
+}
 
 if (colorPlane) {
   colorPlane.addEventListener("pointerdown", (e) => {
@@ -1125,6 +1646,10 @@ imageInput.addEventListener("change", (e) => {
   const reader = new FileReader();
   reader.onload = () => {
     selectedImageSrc = reader.result;
+    if (imagePreview) {
+      imagePreview.src = selectedImageSrc;
+      imagePreview.hidden = false;
+    }
     getCachedImage(selectedImageSrc);
   };
   reader.readAsDataURL(file);
@@ -1132,6 +1657,7 @@ imageInput.addEventListener("change", (e) => {
 
 if (backgroundType) {
   backgroundType.addEventListener("change", () => {
+    recordHistory();
     currentPage().background = backgroundType.value;
     draw();
   });
@@ -1152,21 +1678,35 @@ loadDataInput.addEventListener("change", (e) => {
 });
 
 deleteSelectedBtn.addEventListener("click", deleteSelected);
+clearPageBtn.addEventListener("click", clearCurrentPage);
+undoBtn.addEventListener("click", undo);
+redoBtn.addEventListener("click", redo);
 noteTitle.addEventListener("input", () => {
   state.noteTitle = noteTitle.value;
+  scheduleLocalSave();
 });
 
 subjectSelect.addEventListener("change", () => {
   subjectOther.style.display = subjectSelect.value === "その他" ? "inline-block" : "none";
   state.subject = subjectSelect.value;
+  scheduleLocalSave();
 });
 
 subjectOther.addEventListener("input", () => {
   state.subjectOther = subjectOther.value;
+  scheduleLocalSave();
 });
 
 noteDate.addEventListener("change", () => {
   state.noteDate = noteDate.value;
+  scheduleLocalSave();
+});
+
+createNoteBtn.addEventListener("click", createNewNote);
+goHomeBtn.addEventListener("click", returnHome);
+
+window.addEventListener("pagehide", () => {
+  persistCurrentNote().catch(() => {});
 });
 
 if (topMenuToggle) {
@@ -1192,7 +1732,10 @@ canvas.addEventListener("pointerleave", endPointer);
 
 updateColorPreview();
 updateToolDetails(currentTool);
+updateUndoRedoButtons();
 noteDate.value = getTodayLocalDateString();
 state.noteDate = noteDate.value;
 setTopMenuCollapsed(true);
-draw();
+editorScreen.hidden = true;
+homeScreen.hidden = false;
+renderHome();

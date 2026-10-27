@@ -7,7 +7,20 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <div class="app-shell">
+  <section id="homeScreen" class="home-screen">
+    <header class="home-header">
+      <div>
+        <p class="home-eyebrow">学習ノート</p>
+        <h1>ノート一覧</h1>
+        <p class="home-description">このブラウザに保存されているノートです。</p>
+      </div>
+      <button id="createNoteBtn" class="primary-action" type="button">＋ 新しいノート</button>
+    </header>
+    <p id="homeStatus" class="home-status" aria-live="polite"></p>
+    <div id="noteList" class="note-list" aria-live="polite"></div>
+  </section>
+
+  <div id="editorScreen" class="app-shell" hidden>
     <aside class="left-menu">
       <div class="tool-bar">
         <div class="tool-panel tool-select-panel">
@@ -15,6 +28,7 @@
           <div class="tool-buttons">
             <button class="tool-btn active" data-tool="mouse">マウス</button>
             <button class="tool-btn" data-tool="pen">ペン</button>
+            <button class="tool-btn" data-tool="aiText">AI文字</button>
             <button class="tool-btn" data-tool="marker">マーカー</button>
             <button class="tool-btn" data-tool="line">直線</button>
             <button class="tool-btn" data-tool="eraser">消しゴム</button>
@@ -28,7 +42,7 @@
         <div class="tool-panel tool-detail-panel">
           <p class="tool-panel-title">詳細設定</p>
           <div class="tool-controls">
-            <div class="color-picker detail-control" data-tools="pen marker line">
+            <div class="color-picker detail-control" data-tools="pen aiText marker line text template shape">
               <div class="color-picker-row">
                 <canvas id="colorPlane" class="color-plane" width="150" height="112"></canvas>
                 <canvas id="lightBar" class="light-bar" width="20" height="112"></canvas>
@@ -37,10 +51,16 @@
               <input id="sat" type="hidden" value="70" />
               <input id="light" type="hidden" value="40" />
             </div>
-            <label class="detail-control" data-tools="pen marker line eraser shape">太さ
+            <label class="detail-control" data-tools="pen aiText marker line eraser text template shape">太さ
               <input id="size" type="range" min="1" max="40" value="4" />
             </label>
-            <span id="colorPreview" class="color-preview detail-control" data-tools="pen marker line"></span>
+            <span id="colorPreview" class="color-preview detail-control" data-tools="pen aiText marker line text template shape"></span>
+
+            <p id="aiTextStatus" class="ai-text-help detail-control" data-tools="aiText">書き終えると、少し待って文字へ変換します。</p>
+
+            <label class="detail-control" data-tools="text">文字
+              <textarea id="textInput" class="text-input" rows="4" placeholder="ここに文字を入力"></textarea>
+            </label>
 
             <label class="detail-control" data-tools="template">定型文
               <select id="templateSelect">
@@ -72,10 +92,14 @@
               画像選択
               <input id="imageInput" type="file" accept="image/*" />
             </label>
+            <img id="imagePreview" class="image-preview detail-control" data-tools="image" alt="選択した画像のプレビュー" />
 
             <div class="mouse-detail detail-control" data-tools="mouse">
               <p id="selectedObjectInfo" class="selected-object-info">未選択</p>
               <button id="deleteSelectedBtn">選択中を削除</button>
+              <button id="clearPageBtn">全消去</button>
+              <button id="undoBtn">1手順前に戻る</button>
+              <button id="redoBtn">1手順先に進む</button>
             </div>
           </div>
         </div>
@@ -83,6 +107,7 @@
     </aside>
 
     <main class="main-area top-collapsed" id="mainArea">
+      <button id="goHomeBtn" class="go-home-btn" type="button">ホーム</button>
       <header class="top-bar">
         <div class="meta-row">
           <label>教科
@@ -121,6 +146,9 @@
 
       <footer class="bottom-menu">
       <div class="menu-section">
+        <label id="selectedTextEditor" class="selected-text-editor" hidden>選択中の文字
+          <textarea id="selectedTextInput" class="text-input" rows="3" placeholder="文字を編集"></textarea>
+        </label>
         <button id="savePdfBtn">PDFとして保存</button>
         <button id="saveDataBtn">ノートを保存</button>
         <button id="resetNoteBtn">リセット（白紙に戻す）</button>
@@ -158,6 +186,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
